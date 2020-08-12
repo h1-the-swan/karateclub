@@ -1,6 +1,6 @@
 import community
 import networkx as nx
-from typing import Dict, Optional
+from typing import Dict, Optional, Union, Callable, Set
 from karateclub.estimator import Estimator
 
 class EgoNetSplitter(Estimator):
@@ -13,21 +13,31 @@ class EgoNetSplitter(Estimator):
         resolution (float): Resolution parameter of Python Louvain. Default 1.0.
         seed (int): Random seed value. Default is 42.
         weight (str): the key in the graph to use as weight. Default to 'weight'. Specify None to force using an unweighted version of the graph.
+        method_local (str): The method used for community detection on the ego networks. Can be a string (currently only 'components' is supported), or a callable which takes the ego_net_minus_ego graph and returns a dict of {cluster ID: set of node IDs}. Default is "components", which uses the connected component method.
+        method_global (str): The method used for community detection on the persona graph. Default is "louvain", which uses the python-louvain library.
     """
-    def __init__(self, resolution: float=1.0, seed: int=42, weight: Optional[str]='weight'):
+    def __init__(self, resolution: float=1.0, seed: int=42, weight: Optional[str]='weight', method_local: Union[str, Callable[[nx.Graph], Dict[int, int]]]='components', method_global: Union[str, Callable[[nx.Graph], Dict[int, int]]]='louvain'):
         self.resolution = resolution
         self.seed = seed
         self.weight = weight
+        self.method_local = method_local
+        self.method_global = method_global
 
-    def _create_egonet(self, node):
+    def _create_egonet(self, node, method: Union[str, Callable[[nx.Graph], Dict[int, Set[int]]]]='components'):
         """
         Creating an ego net, extracting personas and partitioning it.
 
         Arg types:
             * **node** *(int)* - Node ID for ego-net (ego node).
+            * **method** *(string or callable, default 'components')* - Method for clustering the ego net. Can be a string (currently only 'components' is supported), or a callable which takes the ego_net_minus_ego graph and returns a dict of {cluster ID: set of node IDs}
         """
         ego_net_minus_ego = self.graph.subgraph(self.graph.neighbors(node))
-        components = {i: n for i, n in enumerate(nx.connected_components(ego_net_minus_ego))}
+        if callable(method):
+            components = method(ego_net_minus_ego)
+        elif method == 'components':
+            components = {i: n for i, n in enumerate(nx.connected_components(ego_net_minus_ego))}
+        else:
+            raise ValueError("Incorrect value for argument `method`: {}".format(method))
         new_mapping = {}
         personalities = []
         for k, v in components.items():
@@ -46,7 +56,7 @@ class EgoNetSplitter(Estimator):
         self.personalities = {}
         self.index = 0
         for node in self.graph.nodes():
-            self._create_egonet(node)
+            self._create_egonet(node, self.method_local)
 
     def _map_personalities(self):
         """
@@ -77,14 +87,18 @@ class EgoNetSplitter(Estimator):
 
         self.persona_graph = nx.from_edgelist(self.persona_graph_edges)
 
-    def _create_partitions(self):
+    def _create_partitions(self, method: Union[str, Callable[[nx.Graph], Dict[int, int]]]='louvain'):
         """
         Creating a non-overlapping clustering of nodes in the persona graph.
+            * **method** *(string or callable, default 'louvain')* - Method for clustering the persona graph. Can be a string (currently only 'louvain' is supported), or a callable which takes the persona graph and returns a dict of {node ID: cluster ID}
         """
-        if self.weight is None:
-            self.partitions = community.best_partition(self.persona_graph, resolution=self.resolution)
-        else:
-            self.partitions = community.best_partition(self.persona_graph, resolution=self.resolution, weight=self.weight)
+        if callable(method):
+            self.partitions = method(self.persona_graph)
+        elif method == 'louvain':
+            if self.weight is None:
+                self.partitions = community.best_partition(self.persona_graph, resolution=self.resolution)
+            else:
+                self.partitions = community.best_partition(self.persona_graph, resolution=self.resolution, weight=self.weight)
         self.overlapping_partitions = {node: [] for node in self.graph.nodes()}
         for node, membership in self.partitions.items():
             self.overlapping_partitions[self.personality_map[node]].append(membership)
@@ -102,7 +116,7 @@ class EgoNetSplitter(Estimator):
         self._create_egonets()
         self._map_personalities()
         self._create_persona_graph()
-        self._create_partitions()
+        self._create_partitions(self.method_global)
 
     def get_memberships(self) -> Dict[int, int]:
         r"""Getting the cluster membership of nodes.
